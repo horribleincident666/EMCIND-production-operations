@@ -48,9 +48,42 @@ const types = {
   ".ico": "image/x-icon"
 };
 
-fs.mkdirSync(dataDir, { recursive: true });
-ensureEmcData();
-ensureRackDb();
+process.on("uncaughtException", (error) => {
+  console.error("[FATAL] Uncaught exception:", error);
+  process.exit(1);
+});
+
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("[FATAL] Unhandled promise rejection at:", promise, "reason:", reason);
+  process.exit(1);
+});
+
+console.log(`[startup] Data directory: ${dataDir}`);
+try {
+  fs.mkdirSync(dataDir, { recursive: true });
+  console.log(`[startup] Data directory ready`);
+} catch (error) {
+  console.error(`[startup] Failed to create data directory at ${dataDir}:`, error);
+  process.exit(1);
+}
+
+try {
+  console.log(`[startup] Initialising EMC data at ${emcDataPath}`);
+  ensureEmcData();
+  console.log(`[startup] EMC data ready`);
+} catch (error) {
+  console.error(`[startup] ensureEmcData() failed:`, error);
+  process.exit(1);
+}
+
+try {
+  console.log(`[startup] Initialising rack database at ${rackDbPath}`);
+  ensureRackDb();
+  console.log(`[startup] Rack database ready`);
+} catch (error) {
+  console.error(`[startup] ensureRackDb() failed:`, error);
+  process.exit(1);
+}
 
 function send(res, status, body, type = "text/plain; charset=utf-8") {
   res.writeHead(status, {
@@ -721,9 +754,17 @@ function isBlockedStaticPath(urlPath) {
 }
 
 function ensureEmcData() {
-  if (!fs.existsSync(emcDataPath)) writeJson(emcDataPath, { formulationHistory: [], auditTrail: [], appState: null, appStateVersion: 0, liveSeq: 0, liveEvents: [], users: defaultUsers() });
+  if (!fs.existsSync(emcDataPath)) {
+    console.log(`[ensureEmcData] Creating new EMC data file`);
+    writeJson(emcDataPath, { formulationHistory: [], auditTrail: [], appState: null, appStateVersion: 0, liveSeq: 0, liveEvents: [], users: defaultUsers() });
+    console.log(`[ensureEmcData] EMC data file created`);
+  } else {
+    console.log(`[ensureEmcData] Existing EMC data file found`);
+  }
   const data = readEmcData();
+  console.log(`[ensureEmcData] EMC data loaded — ${(data.users || []).length} user(s)`);
   if (!data.users || !data.users.length) {
+    console.log(`[ensureEmcData] No users found — seeding default users`);
     data.users = defaultUsers();
     writeJson(emcDataPath, data);
     return;
@@ -732,12 +773,27 @@ function ensureEmcData() {
   changed = purgeSeedStaffUsers(data) || changed;
   changed = ensureAdminAccount(data) || changed;
   if (changed) {
+    console.log(`[ensureEmcData] User data migrated — writing updated file`);
     writeJson(emcDataPath, data);
   }
+  console.log(`[ensureEmcData] Done`);
 }
 
 function readEmcData() {
-  const data = JSON.parse(fs.readFileSync(emcDataPath, "utf8"));
+  let raw;
+  try {
+    raw = fs.readFileSync(emcDataPath, "utf8");
+  } catch (error) {
+    console.error(`[readEmcData] Failed to read ${emcDataPath}:`, error);
+    throw error;
+  }
+  let data;
+  try {
+    data = JSON.parse(raw);
+  } catch (error) {
+    console.error(`[readEmcData] Failed to parse JSON from ${emcDataPath}:`, error);
+    throw error;
+  }
   data.formulationHistory ||= [];
   data.auditTrail ||= [];
   data.appStateVersion ||= 0;
@@ -930,16 +986,35 @@ function filterChatMessages(messages, actor, channel = "group", peerId = "") {
 
 function ensureRackDb() {
   if (!fs.existsSync(rackDbPath)) {
+    console.log(`[ensureRackDb] Creating new rack database file`);
     writeJson(rackDbPath, {
       locations: generateLocations(),
       pallets: [],
       activity: [activity("EMC online RackTrack database created.")]
     });
+    console.log(`[ensureRackDb] Rack database file created`);
+  } else {
+    console.log(`[ensureRackDb] Existing rack database file found`);
   }
+  const db = readRackDb();
+  console.log(`[ensureRackDb] Rack database loaded — ${(db.pallets || []).length} pallet(s), ${(db.locations || []).length} location(s)`);
+  console.log(`[ensureRackDb] Done`);
 }
 
 function readRackDb() {
-  return JSON.parse(fs.readFileSync(rackDbPath, "utf8"));
+  let raw;
+  try {
+    raw = fs.readFileSync(rackDbPath, "utf8");
+  } catch (error) {
+    console.error(`[readRackDb] Failed to read ${rackDbPath}:`, error);
+    throw error;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    console.error(`[readRackDb] Failed to parse JSON from ${rackDbPath}:`, error);
+    throw error;
+  }
 }
 
 function saveRackDb(db) {
@@ -950,9 +1025,19 @@ function saveRackDb(db) {
 }
 
 function writeJson(filePath, value) {
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  } catch (error) {
+    console.error(`[writeJson] Failed to create directory for ${filePath}:`, error);
+    throw error;
+  }
   backupDataFile(filePath, "before-write");
-  fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+  try {
+    fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+  } catch (error) {
+    console.error(`[writeJson] Failed to write ${filePath}:`, error);
+    throw error;
+  }
 }
 
 function backupDataFile(filePath, reason = "backup") {
@@ -1156,6 +1241,15 @@ function displayBatch(pallet) {
   return pallet.batch ? `batch ${pallet.batch}` : "without batch no.";
 }
 
+server.on("error", (error) => {
+  console.error("[server] HTTP server error:", error);
+  if (error.code === "EADDRINUSE") {
+    console.error(`[server] Port ${port} is already in use`);
+    process.exit(1);
+  }
+});
+
 server.listen(port, host, () => {
   console.log(`EMC Production Management running on ${host}:${port}`);
+  console.log(`[startup] Server listening — startup complete`);
 });
